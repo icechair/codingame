@@ -3,8 +3,6 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"hash/fnv"
-	"io"
 	"math"
 	"math/rand"
 	"os"
@@ -12,6 +10,10 @@ import (
 	"strconv"
 	"strings"
 )
+
+func random(min, max int) int {
+	return rand.Intn(max-min) + min
+}
 
 /*
 TODOS:
@@ -87,15 +89,12 @@ var Left Point
 //Right Direction
 var Right Point
 
-//Tile holds the game map information
-type Tile struct {
-	Point
-	Ore  int64
-	Hole int64
+func init() {
+	Up = Point{0, -1}
+	Down = Point{0, 1}
+	Left = Point{-1, 0}
+	Right = Point{1, 0}
 }
-
-//TileMap map of Tiles by Point
-type TileMap = map[Point]Tile
 
 //Entity are Game Elements(robots, items)
 type Entity struct {
@@ -106,133 +105,115 @@ type Entity struct {
 	Item       int
 }
 
-//EntityMap map of Entities By ID
-type EntityMap = map[int]Entity
-
-//FindMyRobots returns the player robots
-func FindMyRobots(em EntityMap) []Entity {
-	list := make([]Entity, 0)
-	for _, e := range em {
-		if e.EntityType == MyRobot {
-			list = append(list, e)
-		}
-	}
-	return list
-}
-
-//EntitiesByDistance sorts Entities by Distance
-func EntitiesByDistance(list []Entity, p Point) {
-	sort.SliceStable(list, func(i, j int) bool {
-		return list[i].Distance(p) < list[j].Distance(p)
-	})
-}
-
-//EntitiesByID sorts Entities by ID
-func EntitiesByID(list []Entity) {
-	sort.SliceStable(list, func(i, j int) bool {
-		return list[i].ID < list[j].ID
-	})
-}
-
-//FindOreTiles returns ore tiles
-func FindOreTiles(tm TileMap) []Tile {
-	list := make([]Tile, 0)
-	for _, t := range tm {
-		if t.Ore > 0 {
-			list = append(list, t)
-		}
-	}
-	return list
-}
-
-//TilesByDistance sorts Tiles by Distance
-func TilesByDistance(list []Tile, p Point) {
-	sort.SliceStable(list, func(i, j int) bool {
-		return list[i].Distance(p) < list[j].Distance(p)
-	})
-}
+//TileMap represents a map of interesting Points on the Playfield
+type TileMap = map[Point]int
 
 //GameObject holds the game information
 type GameObject struct {
-	scanner       *bufio.Scanner
-	Width         int
-	Height        int
+	Width   int
+	Height  int
+	History []TurnInput
+}
+
+//NewGameObject creates GameObjects
+func NewGameObject(scanner *bufio.Scanner) GameObject {
+	obj := GameObject{}
+	scanner.Scan()
+	fmt.Sscan(scanner.Text(), &obj.Width, &obj.Height)
+	obj.History = make([]TurnInput, 0)
+	return obj
+}
+
+//TurnInput defines the Input each Turn
+type TurnInput struct {
 	MyScore       int
 	EnemyScore    int
 	RadarCooldown int
 	TrapCooldown  int
-	Tiles         TileMap
-	Entities      EntityMap
-	TileHash      uint64
 	RadarHolder   int
 	TrapHolder    int
+	RadarTiles    TileMap
+	HoleTiles     TileMap
+	MyRobots      []Entity
+	EnemyRobots   []Entity
 }
 
-//NewGameObject creates GameObjects
-func NewGameObject(input io.Reader) *GameObject {
-	obj := &GameObject{}
-	scanner := bufio.NewScanner(input)
-	scanner.Buffer(make([]byte, 1000000), 1000000)
-	obj.scanner = scanner
+//OreTiles returns a slice of Points
+func (ti TurnInput) OreTiles() []Point {
+	list := make([]Point, 0)
+	for p, ore := range ti.RadarTiles {
+		if ore > 0 {
+			list = append(list, p)
+		}
+	}
+	return list
+}
 
+//ToSeed returns the turn hash
+func (ti TurnInput) ToSeed() int64 {
+	return int64(
+		ti.MyScore +
+			10*ti.EnemyScore +
+			100*ti.RadarCooldown +
+			1000*ti.TrapCooldown +
+			10000*ti.RadarHolder +
+			100000*ti.TrapHolder +
+			1000000*len(ti.OreTiles()),
+		//10000000*len(ti.HoleTiles),
+	)
+}
+
+//NewTurnInput creates new TurnInputs out of scanner
+func NewTurnInput(scanner *bufio.Scanner, game *GameObject) TurnInput {
+	o := TurnInput{}
+	o.RadarHolder = Nothing
+	o.TrapHolder = Nothing
+	o.RadarTiles = make(TileMap)
+	o.HoleTiles = make(TileMap)
+	o.MyRobots = make([]Entity, 0)
+	o.EnemyRobots = make([]Entity, 0)
 	scanner.Scan()
-	fmt.Sscan(scanner.Text(), &obj.Width, &obj.Height)
-	obj.Tiles = make(TileMap)
-	return obj
-}
-
-func hash(s string) uint64 {
-	h := fnv.New64a()
-	h.Write([]byte(s))
-	return h.Sum64()
-}
-
-//ParseTurn collects the start inputs
-func (o *GameObject) ParseTurn() {
-	o.scanner.Scan()
-	fmt.Sscan(o.scanner.Text(), &o.MyScore, &o.EnemyScore)
-	tilestring := ""
+	fmt.Sscan(scanner.Text(), &o.MyScore, &o.EnemyScore)
 	oreline := ""
 	holeline := ""
-
-	for i := 0; i < o.Height; i++ {
-		o.scanner.Scan()
-		line := o.scanner.Text()
+	for i := 0; i < game.Height; i++ {
+		scanner.Scan()
+		line := scanner.Text()
 		inputs := strings.Split(line, " ")
 		//tilestring += line
-		for j := 0; j < o.Width; j++ {
+		for j := 0; j < game.Width; j++ {
+			point := Point{j, i}
+
 			ore, err := strconv.ParseInt(inputs[2*j], 10, 32)
 			oreline += inputs[2*j]
-			if err != nil {
-				ore = -1
+			if err == nil {
+				o.RadarTiles[point] = int(ore)
 			}
 			hole, _ := strconv.ParseInt(inputs[2*j+1], 10, 32)
 			holeline += inputs[2*j+1]
-			point := Point{j, i}
-			o.Tiles[point] = Tile{point, ore, hole}
+			if hole > 0 {
+				o.HoleTiles[point] = int(hole)
+			}
+			//o.Tiles[point] = Tile{point, int(ore), int(hole)}
 		}
 		oreline += "\n"
-		tilestring += oreline
 		holeline += "\n"
 
 	}
-	o.TileHash = hash(tilestring)
 	//Debug("%#v\n", o.TileHash)
 	//Debug("ORE:\n%v\n", oreline)
 	//Debug("HOLE:\n%v\n", holeline)
 	var entityCount int
-	o.scanner.Scan()
-	fmt.Sscan(o.scanner.Text(), &entityCount, &o.RadarCooldown, &o.TrapCooldown)
-	o.Entities = make(EntityMap)
-	o.RadarHolder = Nothing
-	o.TrapHolder = Nothing
+	scanner.Scan()
+	fmt.Sscan(scanner.Text(), &entityCount, &o.RadarCooldown, &o.TrapCooldown)
+
 	for i := 0; i < entityCount; i++ {
 		var id, category, x, y, item int
-		o.scanner.Scan()
-		fmt.Sscan(o.scanner.Text(), &id, &category, &x, &y, &item)
+		scanner.Scan()
+		fmt.Sscan(scanner.Text(), &id, &category, &x, &y, &item)
 		destroyed := x == -1 && y == -1
-		entity := Entity{Point{x, y}, id, category, destroyed, item}
-		o.Entities[id] = entity
+		point := Point{x, y}
+		entity := Entity{point, id, category, destroyed, item}
 		if category == MyRobot {
 			if item == Radar {
 				o.RadarHolder = id
@@ -240,34 +221,37 @@ func (o *GameObject) ParseTurn() {
 			if item == Trap {
 				o.TrapHolder = id
 			}
+			o.MyRobots = append(o.MyRobots, entity)
+		} else if category == EnemyRobot {
+			o.EnemyRobots = append(o.EnemyRobots, entity)
+		} else if category == MyRadar {
+			o.HoleTiles[point] = MyRadar
+		} else if category == MyTrap {
+			o.HoleTiles[point] = MyTrap
 		}
 	}
+	return o
 }
 
-func random(min, max int) int {
-	return rand.Intn(max-min) + min
+//PointsByDistance sorts a slice of points by distance to a point
+func PointsByDistance(list []Point, p Point) {
+	sort.SliceStable(list, (func(i, j int) bool {
+		return p.Distance(list[i]) < p.Distance(list[j])
+	}))
 }
 
 //TakeTurn returns the turns actions
-func (o *GameObject) TakeTurn() []string {
+func (o *GameObject) TakeTurn(ti *TurnInput) []string {
 	actions := make([]string, 0)
-	robots := FindMyRobots(o.Entities)
-	oreTiles := FindOreTiles(o.Tiles)
-	if len(oreTiles) > 0 {
-		rand.Seed(int64(len(oreTiles) * len(robots) * 123123))
-
-	} else {
-		rand.Seed(int64(o.TileHash))
-	}
+	rand.Seed(ti.ToSeed())
 	a := Point{random(0, o.Width/2), random(0, o.Height/2)}
 	b := Point{random(0, o.Width/2), random(0, o.Height/2)}
 	center := a.Add(b)
-	EntitiesByID(robots)
+	oreTiles := ti.OreTiles()
 
-	for _, robot := range robots {
-		TilesByDistance(oreTiles, robot.Point)
-		Debug("%#v -> %#v : %#v\n", robot, center, robot.Distance(center))
-		action := o.RobotAction(robot, robots, oreTiles, center)
+	for _, r := range ti.MyRobots {
+		PointsByDistance(oreTiles, r.Point)
+		action := o.RobotAction(r, ti, oreTiles, center)
 		if strings.Contains(action, "DIG") && len(oreTiles) > 0 {
 			oreTiles = oreTiles[1:]
 		}
@@ -277,19 +261,19 @@ func (o *GameObject) TakeTurn() []string {
 }
 
 //RobotAction decides the action a robot takes
-func (o *GameObject) RobotAction(robot Entity, robots []Entity, oreTiles []Tile, p Point) string {
+func (o *GameObject) RobotAction(robot Entity, ti *TurnInput, oreTiles []Point, p Point) string {
 	// robot := o.Entities[id]
 	if robot.Destroyed {
 		return "WAIT"
 	}
-	if o.RadarHolder == Nothing && len(oreTiles) < len(robots)*2 {
-		o.RadarHolder = robot.ID
+	if ti.RadarHolder == Nothing && ti.RadarCooldown == 0 {
+		ti.RadarHolder = robot.ID
 		return "REQUEST RADAR"
 	}
 	if robot.Item == Ore {
 		return fmt.Sprintf("MOVE 0 %v ID(%v)", robot.Y, robot.ID)
 	}
-	if o.RadarHolder == robot.ID {
+	if ti.RadarHolder == robot.ID {
 		return fmt.Sprintf("DIG %v %v ID(%v)", p.X, p.Y, robot.ID)
 	}
 	if len(oreTiles) > 0 {
@@ -316,17 +300,17 @@ Action order for one turn
 */
 
 func main() {
-	Up = Point{0, -1}
-	Down = Point{0, 1}
-	Left = Point{-1, 0}
-	Right = Point{1, 0}
-
-	game := NewGameObject(os.Stdin)
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 1000000), 1000000)
+	game := NewGameObject(scanner)
 	for {
-		game.ParseTurn()
-		actions := game.TakeTurn()
+		ti := NewTurnInput(scanner, &game)
+		Debug("RadarLength: %v, HoleLength: %v\n", len(ti.RadarTiles), len(ti.HoleTiles))
+		actions := game.TakeTurn(&ti)
+		game.History = append(game.History, ti)
 		for _, action := range actions {
 			fmt.Println(action) // WAIT|MOVE x y|DIG x y|REQUEST item
 		}
+
 	}
 }
