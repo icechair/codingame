@@ -7,6 +7,7 @@ import (
 	"strings"
 )
 
+//Constants
 const (
 	DEBUG      = true
 	Width      = 12
@@ -21,6 +22,7 @@ const (
 	BUILDING   = 1
 )
 
+//UnitCost struct
 type UnitCost struct {
 	Level  int
 	Train  int
@@ -213,6 +215,7 @@ func (m *TileMap) BFS(start Point, until func(c Point) bool) map[Point]int {
 	return distance
 }
 
+//ByDistance Sorter
 type ByDistance struct {
 	distance map[Point]int
 	tiles    []*Tile
@@ -230,6 +233,7 @@ func (b ByDistance) Less(i, j int) bool {
 	return b.tiles[i].X < b.tiles[j].X
 }
 
+//TilesSortedByDistanceFrom point
 func (m TileMap) TilesSortedByDistanceFrom(p Point) []*Tile {
 	distance := m.BFS(p, func(c Point) bool { return false })
 	tiles := make([]*Tile, len(m))
@@ -326,10 +330,11 @@ func ParseGameState(mines map[Point]Point) *GameState {
 	return gs
 }
 
-func (gs GameState) mineCost() int {
-	return 20 + 4*len(gs.Buildings[MINE])
+func (g GameState) mineCost() int {
+	return 20 + 4*len(g.Buildings[MINE])
 }
 
+//Train action
 func (g *GameState) Train(tile *Tile) string {
 	var level = 1
 	if tile.DefendedBy != nil {
@@ -359,6 +364,7 @@ func (g *GameState) Train(tile *Tile) string {
 	return ""
 }
 
+//Move action
 func (g *GameState) Move(unit *Unit, enemyHQ Point) string {
 	if unit.ID == -1 {
 		return ""
@@ -416,6 +422,7 @@ func (g *GameState) Move(unit *Unit, enemyHQ Point) string {
 	return ""
 }
 
+//Build action
 func (g *GameState) Build(tile *Tile, myHQ Point) string {
 	if tile.MineSpot {
 		if tile.OccupiedBy == nil {
@@ -447,6 +454,7 @@ func (g GameState) String() string {
 	return fmt.Sprintf("Gold:%d, Income:%d, EnemyGold:%d,EnemyIncome: %d", g.Gold, g.Income, g.EnemyGold, g.EnemyIncome)
 }
 
+//Turn actions
 func (g *GameState) Turn(turn int) []string {
 	var actions []string
 	debug("turn:%d, %s\n", turn, g)
