@@ -17,7 +17,6 @@ func random(min, max int) int {
 
 /*
 TODOS:
- - Optimize the tile storage. only interesting tiles are those with stuff in or on it
  - Optimize the radar placement. keep radar positions, radar coverage in mind, find out if ore placement is somehow biased
  - optimize dig target aquisition. dont consider empty holes, dig randomly if no ore is available, keep move distance in mind
  - lookup enemy radars and traps. tile history, item history for robots
@@ -40,7 +39,7 @@ func (a Point) Add(b Point) Point {
 }
 
 //Clamp restricts the point into the boundaries of the gameworld
-func (a Point) Clamp(o GameObject) Point {
+func (a Point) Clamp(o *GameObject) Point {
 	if a.X < 0 {
 		a.X = 0
 	}
@@ -56,9 +55,20 @@ func (a Point) Clamp(o GameObject) Point {
 	return a
 }
 
-//Distance Returns the manhatten distance between Points
+//Distance returns the manhatten distance between points
 func (a Point) Distance(b Point) int {
 	return int(math.Abs(float64(b.X-a.X)) + math.Abs(float64(b.Y-a.Y)))
+}
+
+//Neigbours returns the neighbouring cell tiles
+func (a Point) Neigbours(o *GameObject) []Point {
+	list := make([]Point, 4)
+	list[0] = a.Add(Up).Clamp(o)
+	list[1] = a.Add(Down).Clamp(o)
+	list[2] = a.Add(Left).Clamp(o)
+	list[3] = a.Add(Right).Clamp(o)
+
+	return list
 }
 
 //Game Constants
@@ -69,6 +79,8 @@ const (
 	EnemyRobot = 1
 	MyRadar    = 2
 	MyTrap     = 3
+	EnemyTrap  = 8
+	EnemyRadar = 9
 	Nothing    = -1
 	Radar      = 2
 	Trap       = 3
@@ -101,12 +113,24 @@ type Entity struct {
 	Point
 	ID         int
 	EntityType int
-	Destroyed  bool
 	Item       int
 }
 
+//Destroyed robots have position{-1,-1}
+func (e Entity) Destroyed() bool {
+	return e.X == Nothing && e.Y == Nothing
+}
+
+//Idle returns true if the robot is not carrying an item
+func (e Entity) Idle() bool {
+	return e.Item == Nothing
+}
+
 //TileMap represents a map of interesting Points on the Playfield
-type TileMap = map[Point]int
+type TileMap map[Point]int
+
+//EntityMap storage
+type EntityMap map[int]Entity
 
 //GameObject holds the game information
 type GameObject struct {
@@ -134,8 +158,8 @@ type TurnInput struct {
 	TrapHolder    int
 	RadarTiles    TileMap
 	HoleTiles     TileMap
-	MyRobots      []Entity
-	EnemyRobots   []Entity
+	MyRobots      EntityMap
+	EnemyRobots   EntityMap
 }
 
 //OreTiles returns a slice of Points
@@ -146,7 +170,24 @@ func (ti TurnInput) OreTiles() []Point {
 			list = append(list, p)
 		}
 	}
+	sort.SliceStable(list, func(i, j int) bool {
+		return ti.RadarTiles[list[i]] > ti.RadarTiles[list[j]]
+	})
 	return list
+}
+
+//PlayerRobots gets robots sorted by id
+func (ti TurnInput) PlayerRobots() []Entity {
+	var keys []int
+	for k := range ti.MyRobots {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	robots := make([]Entity, 0)
+	for _, id := range keys {
+		robots = append(robots, ti.MyRobots[id])
+	}
+	return robots
 }
 
 //ToSeed returns the turn hash
@@ -158,79 +199,113 @@ func (ti TurnInput) ToSeed() int64 {
 			1000*ti.TrapCooldown +
 			10000*ti.RadarHolder +
 			100000*ti.TrapHolder +
-			1000000*len(ti.OreTiles()),
-		//10000000*len(ti.HoleTiles),
+			1000000*len(ti.OreTiles()) +
+			10000000*len(ti.HoleTiles),
 	)
 }
 
 //NewTurnInput creates new TurnInputs out of scanner
 func NewTurnInput(scanner *bufio.Scanner, game *GameObject) TurnInput {
-	o := TurnInput{}
-	o.RadarHolder = Nothing
-	o.TrapHolder = Nothing
-	o.RadarTiles = make(TileMap)
-	o.HoleTiles = make(TileMap)
-	o.MyRobots = make([]Entity, 0)
-	o.EnemyRobots = make([]Entity, 0)
+	ti := TurnInput{}
+	ti.RadarHolder = Nothing
+	ti.TrapHolder = Nothing
+	ti.RadarTiles = make(TileMap)
+	ti.HoleTiles = make(TileMap)
+	ti.MyRobots = make(EntityMap)
+	ti.EnemyRobots = make(EntityMap)
 	scanner.Scan()
-	fmt.Sscan(scanner.Text(), &o.MyScore, &o.EnemyScore)
+	fmt.Sscan(scanner.Text(), &ti.MyScore, &ti.EnemyScore)
+
 	oreline := ""
 	holeline := ""
 	for i := 0; i < game.Height; i++ {
 		scanner.Scan()
 		line := scanner.Text()
+		//Debug("%v\n", line)
 		inputs := strings.Split(line, " ")
-		//tilestring += line
+
 		for j := 0; j < game.Width; j++ {
 			point := Point{j, i}
 
 			ore, err := strconv.ParseInt(inputs[2*j], 10, 32)
 			oreline += inputs[2*j]
 			if err == nil {
-				o.RadarTiles[point] = int(ore)
+				ti.RadarTiles[point] = int(ore)
 			}
 			hole, _ := strconv.ParseInt(inputs[2*j+1], 10, 32)
 			holeline += inputs[2*j+1]
 			if hole > 0 {
-				o.HoleTiles[point] = int(hole)
+				ti.HoleTiles[point] = int(hole)
 			}
 			//o.Tiles[point] = Tile{point, int(ore), int(hole)}
 		}
 		oreline += "\n"
 		holeline += "\n"
-
 	}
-	//Debug("%#v\n", o.TileHash)
-	//Debug("ORE:\n%v\n", oreline)
-	//Debug("HOLE:\n%v\n", holeline)
+	//Debug("ORE:\n%v\nHOLE:\n%v\n", oreline, holeline)
 	var entityCount int
 	scanner.Scan()
-	fmt.Sscan(scanner.Text(), &entityCount, &o.RadarCooldown, &o.TrapCooldown)
+	fmt.Sscan(scanner.Text(), &entityCount, &ti.RadarCooldown, &ti.TrapCooldown)
 
 	for i := 0; i < entityCount; i++ {
 		var id, category, x, y, item int
 		scanner.Scan()
 		fmt.Sscan(scanner.Text(), &id, &category, &x, &y, &item)
-		destroyed := x == -1 && y == -1
 		point := Point{x, y}
-		entity := Entity{point, id, category, destroyed, item}
+		entity := Entity{point, id, category, item}
 		if category == MyRobot {
 			if item == Radar {
-				o.RadarHolder = id
+				ti.RadarHolder = id
 			}
 			if item == Trap {
-				o.TrapHolder = id
+				ti.TrapHolder = id
 			}
-			o.MyRobots = append(o.MyRobots, entity)
+			ti.MyRobots[id] = entity
 		} else if category == EnemyRobot {
-			o.EnemyRobots = append(o.EnemyRobots, entity)
+			ti.EnemyRobots[id] = entity
 		} else if category == MyRadar {
-			o.HoleTiles[point] = MyRadar
+			ti.HoleTiles[point] = MyRadar
 		} else if category == MyTrap {
-			o.HoleTiles[point] = MyTrap
+			ti.HoleTiles[point] = MyTrap
 		}
 	}
-	return o
+	/* you cant see what the enemy robots are carrying
+	if len(game.History) > 0 {
+		lt := game.History[len(game.History)-1]
+		for p, hole := range lt.HoleTiles {
+			if hole == EnemyTrap {
+				o.HoleTiles[p] = EnemyTrap
+			}
+		}
+
+		for id, robot := range o.EnemyRobots {
+			if robot.Item == Nothing {
+				if lt.EnemyRobots[id].Item == Trap {
+					for _, p := range robot.Neigbours(game) {
+						if _, ok := o.HoleTiles[p]; ok {
+							o.HoleTiles[p] = EnemyTrap
+						}
+					}
+				}
+
+				if lt.EnemyRobots[id].Item == Radar {
+					for _, p := range robot.Neigbours(game) {
+						if _, ok := o.HoleTiles[p]; ok {
+							o.HoleTiles[p] = EnemyRadar
+						}
+					}
+				}
+			}
+		}
+	}
+	*/
+	/* for p, h := range o.HoleTiles {
+		Debug("%v, %v\n", p, h)
+	}
+	for _, r := range o.EnemyRobots {
+		Debug("%#v\n", r)
+	} */
+	return ti
 }
 
 //PointsByDistance sorts a slice of points by distance to a point
@@ -241,17 +316,14 @@ func PointsByDistance(list []Point, p Point) {
 }
 
 //TakeTurn returns the turns actions
-func (o *GameObject) TakeTurn(ti *TurnInput) []string {
+func (o GameObject) TakeTurn(ti *TurnInput) []string {
 	actions := make([]string, 0)
-	rand.Seed(ti.ToSeed())
-	a := Point{random(0, o.Width/2), random(0, o.Height/2)}
-	b := Point{random(0, o.Width/2), random(0, o.Height/2)}
-	center := a.Add(b)
+	rand.Seed(42)
 	oreTiles := ti.OreTiles()
 
-	for _, r := range ti.MyRobots {
+	for _, r := range ti.PlayerRobots() {
 		PointsByDistance(oreTiles, r.Point)
-		action := o.RobotAction(r, ti, oreTiles, center)
+		action := o.RobotAction(r, ti, oreTiles)
 		if strings.Contains(action, "DIG") && len(oreTiles) > 0 {
 			oreTiles = oreTiles[1:]
 		}
@@ -261,31 +333,94 @@ func (o *GameObject) TakeTurn(ti *TurnInput) []string {
 }
 
 //RobotAction decides the action a robot takes
-func (o *GameObject) RobotAction(robot Entity, ti *TurnInput, oreTiles []Point, p Point) string {
-	// robot := o.Entities[id]
-	if robot.Destroyed {
+func (o GameObject) RobotAction(robot Entity, ti *TurnInput, oreTiles []Point) string {
+	if robot.Destroyed() {
 		return "WAIT"
-	}
-	if ti.RadarHolder == Nothing && ti.RadarCooldown == 0 {
-		ti.RadarHolder = robot.ID
-		return "REQUEST RADAR"
 	}
 	if robot.Item == Ore {
 		return fmt.Sprintf("MOVE 0 %v ID(%v)", robot.Y, robot.ID)
 	}
-	if ti.RadarHolder == robot.ID {
-		return fmt.Sprintf("DIG %v %v ID(%v)", p.X, p.Y, robot.ID)
+	if robot.Item == Radar {
+		return o.RadarAction(robot, ti)
+	}
+	if robot.Item == Trap {
+		return o.TrapAction(robot, ti)
+	}
+	if ti.RadarHolder == Nothing && ti.RadarCooldown == 0 && robot.Point.Y > 0 && len(oreTiles) < 2*len(ti.MyRobots) {
+		ti.RadarHolder = robot.ID
+		return "REQUEST RADAR"
+	}
+	if ti.TrapHolder == Nothing && ti.TrapCooldown == 0 {
+		ti.TrapHolder = robot.ID
+		return "REQUEST TRAP"
 	}
 	if len(oreTiles) > 0 {
-		tile := oreTiles[0]
-		//if tile.Hole == 0 {
+		var tile Point
+		for len(oreTiles) > 0 {
+			tile, oreTiles = oreTiles[0], oreTiles[1:]
+			if hole, ok := ti.HoleTiles[tile]; !ok || (ok && hole != MyTrap) {
+				break
+			}
+			//if tile.Hole == 0 {
+		}
 		return fmt.Sprintf("DIG %v %v ID(%v)", tile.X, tile.Y, robot.ID)
 		//}
 	}
-	offset := Point{random(-RadarRange, RadarRange), random(-RadarRange, RadarRange)}
-	target := p.Add(offset).Clamp(*o)
+	target := Point{1, robot.Y}
+	for {
+		target = target.Add(Point{random(1, MoveRange), 0})
+		if _, ok := ti.HoleTiles[target]; !ok {
+			break
+		}
+	}
 
-	return fmt.Sprintf("MOVE %v %v ID(%v)", target.X, target.Y, robot.ID)
+	return fmt.Sprintf("DIG %v %v ID(%v)", target.X, target.Y, robot.ID)
+}
+
+//TrapAction places Traps
+func (o GameObject) TrapAction(robot Entity, ti *TurnInput) string {
+	targets := make([]Point, 0)
+	for k := range ti.RadarTiles {
+		targets = append(targets, k)
+	}
+	PointsByDistance(targets, robot.Point)
+	target := robot.Add(
+		Point{
+			random(-1, 1),
+			random(-1, 1),
+		},
+	)
+	for len(targets) > 0 {
+		target, targets = targets[0], targets[1:]
+		if ti.RadarTiles[target] > 1 {
+			break
+		}
+	}
+
+	return fmt.Sprintf("DIG %v %v ID(%v)", target.X, target.Y, robot.ID)
+}
+
+//RadarAction places Radars
+func (o GameObject) RadarAction(robot Entity, ti *TurnInput) string {
+	p := Point{5, robot.Y}
+	targets := make([]Point, 0)
+	for p, hole := range ti.HoleTiles {
+		if hole == MyRadar {
+			rd := p.Add(Point{4, 5}) //.Clamp(&o)
+			if _, ok := ti.HoleTiles[rd]; !ok && rd.X < o.Width && rd.Y < o.Height {
+				targets = append(targets, rd.Clamp(&o))
+			}
+			ru := p.Add(Point{4, -5}) //.Clamp(&o)
+			if _, ok := ti.HoleTiles[ru]; !ok && ru.X < o.Width && ru.Y > 0 {
+				targets = append(targets, ru.Clamp(&o))
+			}
+		}
+	}
+	if len(targets) > 0 {
+		PointsByDistance(targets, robot.Point)
+		p = targets[0]
+	}
+	return fmt.Sprintf("DIG %v %v ID(%v)", p.X, p.Y, robot.ID)
 }
 
 /*
