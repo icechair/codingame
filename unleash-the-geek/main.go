@@ -22,6 +22,16 @@ type Point struct {
 	Y int
 }
 
+//Add 2 points
+func (a Point) Add(b Point) Point {
+	return Point{a.X + b.X, a.Y + b.Y}
+}
+
+//Distance Returns the manhatten distance between Points
+func (a Point) Distance(b Point) int {
+	return int(math.Abs(float64(b.X-a.X)) + math.Abs(float64(b.Y-a.Y)))
+}
+
 //Game Constants
 const (
 	Hole       = 1
@@ -43,16 +53,6 @@ var Left Point
 
 //Right Direction
 var Right Point
-
-//Add 2 points
-func (a Point) Add(b Point) Point {
-	return Point{a.X + b.X, a.Y + b.Y}
-}
-
-//Distance Returns the manhatten distance between Points
-func (a Point) Distance(b Point) int {
-	return int(math.Abs(float64(b.X-a.X)) + math.Abs(float64(b.Y-a.Y)))
-}
 
 //Tile holds the game map information
 type Tile struct {
@@ -80,7 +80,7 @@ type EntityMap = map[int]Entity
 func FindRobots(em EntityMap) []Entity {
 	list := make([]Entity, 0)
 	for _, e := range em {
-		if e.EntityType == MyRobot {
+		if e.EntityType == MyRobot && !e.Destroyed {
 			list = append(list, e)
 		}
 	}
@@ -165,9 +165,16 @@ func (o GameObject) TakeTurn() []string {
 	return actions
 }
 
-/**
- * Deliver more ore to hq (left side of the map) than your opponent. Use radars to find ore but beware of traps!
- **/
+/*
+Action order for one turn
+
+1. If DIG commands would trigger Traps, they go off.
+2. The other DIG commands are resolved.
+3. REQUEST commands are resolved.
+4. Request timers are decremented.
+5. MOVE and WAIT commands are resolved.
+6. Ore is delivered to the headquarters.
+*/
 
 func main() {
 	Up = Point{0, -1}
